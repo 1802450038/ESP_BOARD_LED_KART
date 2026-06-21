@@ -1,0 +1,258 @@
+// #include <WiFi.h>
+// #include <WebServer.h>
+// #include <ESPmDNS.h>
+// #include <Preferences.h>
+// #include "esp_websocket_client.h" // Native ESP-IDF WebSocket Client
+// #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
+// #include <Adafruit_NeoPixel.h>
+// #include <ArduinoJson.h> // Library for parsing the JSON from Python
+
+// // ======================= PINOS DE HARDWARE =======================
+// #define SETUP_BTN_PIN 17 // Botão para Setup/Reset
+// #define RGB_LED_PIN 48   // LED RGB nativo
+// #define NUM_LEDS 1
+
+// // SEUS PINOS DE DISPLAY ORIGINAIS
+// #define GND_1 -1
+// #define OE_PIN 13
+// #define LAT_PIN 12 //-> 15
+// #define CLK_PIN 11
+// #define D_PIN 10 //-> 14
+// #define C_PIN 9
+// #define B_PIN 8
+// #define A_PIN 7
+
+// #define GND_2 -1
+// #define B2_PIN 6
+// #define G2_PIN 5
+// #define R2_PIN 4
+// #define GND_3 -1
+// #define B1_PIN 3
+// #define G1_PIN 2
+// #define R1_PIN 1
+
+// #define E_PIN -1
+
+// #define PANEL_RES_X 64
+// #define PANEL_RES_Y 32
+// #define PANEL_CHAIN 2
+
+// MatrixPanel_I2S_DMA *dma_display = nullptr;
+// Adafruit_NeoPixel pixels(NUM_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
+// WebServer server(80);
+// Preferences preferences;
+// esp_websocket_client_handle_t ws_client = NULL;
+
+// String rede_ssid, rede_senha, ws_ip, ws_porta, esp_id;
+// String numeroAleatorio;
+// bool configurado = false;
+
+// // HTML Configuration Page
+// const char *htmlForm = R"rawliteral(
+// <!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+// <title>Configurar ESP32</title></head><body style="font-family: Arial; padding: 20px;">
+// <h2>Configuração da Placa</h2>
+// <form action="/salvar" method="POST">
+//   <b>Nome da Rede WiFi:</b><br><input type="text" name="ssid" required><br><br>
+//   <b>Senha do WiFi:</b><br><input type="password" name="senha"><br><br>
+//   <b>IP do Servidor Python (ex: 192.168.1.15):</b><br><input type="text" name="ip" required><br><br>
+//   <b>Porta (ex: 8765):</b><br><input type="text" name="porta" value="8765" required><br><br>
+//   <b>ID desta Placa:</b><br><input type="text" name="espid" required><br><br>
+//   <input type="submit" value="Salvar e Reiniciar" style="padding: 10px; background: #28a745; color: white; border: none; border-radius: 5px;">
+// </form></body></html>
+// )rawliteral";
+
+// // ======================= HELPERS DE COR =======================
+// // Converte cor HEX (#RRGGBB) vinda do Python para RGB565 do HUB75
+// uint16_t hexToRGB565(String hexColor) {
+//   if (hexColor.startsWith("#")) {
+//     hexColor.remove(0, 1);
+//   }
+//   long number = strtol(hexColor.c_str(), NULL, 16);
+//   uint8_t r = (number >> 16) & 0xFF;
+//   uint8_t g = (number >> 8) & 0xFF;
+//   uint8_t b = number & 0xFF;
+  
+//   if(dma_display != nullptr) {
+//     return dma_display->color565(r, g, b);
+//   }
+//   return 0xFFFF; // Branco padrão em caso de erro
+// }
+
+// // ======================= DISPLAY SETUP =======================
+// void setupDisplay()
+// {
+//   HUB75_I2S_CFG::i2s_pins _pins = {R1_PIN, G1_PIN, B1_PIN, R2_PIN, G2_PIN, B2_PIN, A_PIN, B_PIN, C_PIN, D_PIN, E_PIN, LAT_PIN, OE_PIN, CLK_PIN};
+//   HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN, _pins);
+//   mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_10M;
+//   mxconfig.driver = HUB75_I2S_CFG::FM6124;
+//   mxconfig.clkphase = false;
+
+//   dma_display = new MatrixPanel_I2S_DMA(mxconfig);
+//   dma_display->begin();
+//   dma_display->setTextWrap(true);
+//   dma_display->setBrightness8(15);
+//   dma_display->clearScreen();
+// }
+
+// void printDisplay(String message, int textSize, uint16_t color)
+// {
+//   dma_display->fillScreen(0);
+//   dma_display->setCursor(0, 0);
+//   dma_display->setTextSize(textSize);
+//   dma_display->setTextColor(color);
+//   dma_display->print(message);
+// }
+
+// // ======================= WEBSOCKET HANDLER =======================
+// static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+// {
+//   esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
+//   switch (event_id)
+//   {
+//   case WEBSOCKET_EVENT_CONNECTED:
+//     Serial.println("[WS] Conectado ao Servidor Python!");
+//     esp_websocket_client_send_text(ws_client, esp_id.c_str(), esp_id.length(), portMAX_DELAY);
+//     break;
+    
+//   case WEBSOCKET_EVENT_DATA:
+//     if (data->op_code == 1) // 1 = Text frame
+//     {
+//       // Convert payload pointer to String
+//       String payload = "";
+//       for (int i = 0; i < data->data_len; i++) {
+//         payload += (char)data->data_ptr[i];
+//       }
+      
+//       Serial.println("[WS] JSON Recebido: " + payload);
+
+//       // Parse incoming JSON using ArduinoJson 7
+//       JsonDocument doc;
+//       DeserializationError error = deserializeJson(doc, payload);
+
+//       if (!error) {
+//         String texto = doc["texto"] | "";
+//         int tamanho = doc["tamanho"] | 1;
+//         String corHex = doc["cor"] | "#FFFFFF";
+
+//         // Convert hex to display color format and update matrix
+//         uint16_t corConvertida = hexToRGB565(corHex);
+//         printDisplay(texto, tamanho, corConvertida);
+//       } else {
+//         Serial.print(F("Erro ao analisar JSON: "));
+//         Serial.println(error.f_str());
+//       }
+//     }
+//     break;
+    
+//   case WEBSOCKET_EVENT_DISCONNECTED:
+//     Serial.println("[WS] Desconectado do Servidor.");
+//     break;
+//   }
+// }
+
+// void setup()
+// {
+//   delay(1000);
+//   Serial.begin(115200);
+//   delay(1000);
+//   Serial.println("\nIniciando ESP32...");
+  
+//   pixels.begin(); // Inicializa NeoPixel nativo caso vá usar
+  
+//   delay(1000);
+//   Serial.println("Iniciando display...");
+//   setupDisplay();
+  
+//   // Load saved configurations
+//   preferences.begin("config", false);
+//   rede_ssid = preferences.getString("ssid", "");
+//   rede_senha = preferences.getString("senha", "");
+//   ws_ip = preferences.getString("ip", "");
+//   ws_porta = preferences.getString("porta", "");
+//   esp_id = preferences.getString("espid", "");
+
+//   numeroAleatorio = preferences.getString("rand", "");
+//   if (numeroAleatorio == "")
+//   {
+//     numeroAleatorio = String(random(1000, 9999));
+//     preferences.putString("rand", numeroAleatorio);
+//   }
+//   preferences.end();
+
+//   if (rede_ssid == "" || ws_ip == "")
+//   {
+//     // ---- CONFIGURATION MODE ----
+//     Serial.println("\nModo de Configuração ativado.");
+//     String nomeAP = "esp-settings-" + numeroAleatorio;
+
+//     WiFi.softAP(nomeAP.c_str());
+//     Serial.print("Ponto de Acesso criado: ");
+//     Serial.println(nomeAP);
+
+//     String mDnsName = "esp32";
+//     if (MDNS.begin(mDnsName.c_str()))
+//     {
+//       Serial.println("MDNS iniciado: http://" + mDnsName + ".local");
+//     }
+
+//     server.on("/", []() { 
+//       server.send(200, "text/html", htmlForm); 
+//     });
+
+//     server.on("/salvar", HTTP_POST, []() {
+//       preferences.begin("config", false);
+//       preferences.putString("ssid", server.arg("ssid"));
+//       preferences.putString("senha", server.arg("senha"));
+//       preferences.putString("ip", server.arg("ip"));
+//       preferences.putString("porta", server.arg("porta"));
+//       preferences.putString("espid", server.arg("espid"));
+//       preferences.end();
+      
+//       server.send(200, "text/html", "<h2>Configuracoes salvas! Reiniciando...</h2>");
+//       delay(1500);
+//       ESP.restart(); 
+//     });
+
+//     server.begin();
+//     Serial.println("Servidor Web (Nativo) iniciado!");
+//   }
+//   else
+//   {
+//     // ---- WORK MODE ----
+//     configurado = true;
+//     Serial.println("\nConectando ao WiFi: " + rede_ssid);
+//     WiFi.begin(rede_ssid.c_str(), rede_senha.c_str());
+
+//     while (WiFi.status() != WL_CONNECTED)
+//     {
+//       delay(500);
+//       Serial.print(".");
+//     }
+//     Serial.println("\nWiFi Conectado! IP: " + WiFi.localIP().toString());
+
+//     // Configure Native ESP-IDF WebSocket Client
+//     String uri = "ws://" + ws_ip + ":" + ws_porta;
+//     esp_websocket_client_config_t websocket_cfg = {};
+//     websocket_cfg.uri = uri.c_str();
+
+//     ws_client = esp_websocket_client_init(&websocket_cfg);
+//     esp_websocket_register_events(ws_client, WEBSOCKET_EVENT_ANY, websocket_event_handler, (void *)ws_client);
+//     esp_websocket_client_start(ws_client);
+
+//     Serial.println("Iniciando conexao WebSocket para: " + uri);
+//   }
+// }
+
+// void loop()
+// {
+//   if (!configurado)
+//   {
+//     server.handleClient(); // Handle HTTP requests natively
+//   }
+//   delay(10);
+// }
+
+// //  C:\Users\Gabriel\.platformio\penv\Scripts\platformio.exe run --target upload --upload-port COMX 
+
+// // C:\Users\Gabriel\Desktop\CRONO_PY\Cronolink.accdb

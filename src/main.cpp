@@ -1,470 +1,387 @@
-#include <Arduino.h>
-#include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <WiFi.h>
-#include <esp_now.h>
-#include <Preferences.h>
-#include <LittleFS.h>
-#include <ESPAsyncWebServer.h>
+#include <WebServer.h>
 #include <ESPmDNS.h>
-#include <ArduinoJson.h>
-#include <esp_wifi.h>
+#include <Preferences.h>
+#include "esp_websocket_client.h" 
+#include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <Adafruit_NeoPixel.h>
+#include <ArduinoJson.h>
 
 // ======================= PINOS DE HARDWARE =======================
-#define SETUP_BTN_PIN 17  // Botão para Setup/Reset
-#define RGB_LED_PIN   48  // LED RGB nativo
-#define NUM_LEDS      1
+#define SETUP_BTN_PIN 17 
+#define RGB_LED_PIN 48   
+#define NUM_LEDS 1
 
 // SEUS PINOS DE DISPLAY ORIGINAIS
-#define R1_PIN 3
-#define B1_PIN 4
-#define R2_PIN 5
-#define B2_PIN 6
+#define GND_1 -1
+#define OE_PIN 13
+#define LAT_PIN 12
+#define CLK_PIN 11
+#define D_PIN 10
+#define C_PIN 9
+#define B_PIN 8
 #define A_PIN 7
-#define C_PIN 8
-#define CLK_PIN 9
-#define OE_PIN 10
-#define G1_PIN 11
-#define G2_PIN 12
-#define B_PIN 13
-#define D_PIN 14
-#define LAT_PIN 15 
+
+#define GND_2 -1
+#define B2_PIN 6
+#define G2_PIN 5
+#define R2_PIN 4
+#define GND_3 -1
+#define B1_PIN 3
+#define G1_PIN 2
+#define R1_PIN 1
 #define E_PIN -1
 
 #define PANEL_RES_X 64
 #define PANEL_RES_Y 32
 #define PANEL_CHAIN 2
 
-// Objetos
 MatrixPanel_I2S_DMA *dma_display = nullptr;
-Preferences prefs;
-AsyncWebServer server(80);
 Adafruit_NeoPixel pixels(NUM_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
+WebServer server(80);
+Preferences preferences;
+esp_websocket_client_handle_t ws_client = NULL;
 
-// Variáveis
-bool isConfigured = false;
-String currentRole = "slave";
-bool forceConfigMode = false; // Botão pressionado no boot
+String rede_ssid, rede_senha, ws_ip, ws_porta, esp_id;
+String numeroAleatorio;
+bool configurado = false;
 
-// Botão Reset
-unsigned long btnPressStartTime = 0;
+// Buffer para imagens
+uint8_t *img_buffer = nullptr;
+int img_buffer_idx = 0;
+
+// Controle de Estado
+bool ws_is_connected = false;
+unsigned long msgRedTimer = 0;
+
+// ======================= VARIÁVEIS DO BOTÃO =======================
+unsigned long btnPressStart = 0;
 bool btnIsPressed = false;
+bool resetPromptActive = false;
+bool btnHandled = false;
 
-// Estruturas
-typedef struct struct_message {
-    int id;
-    char text[64];
-    int x; int y; int size;
-    uint16_t color;
-    bool clear;
-} struct_message;
+// HTML Configuration Page
+const char *htmlForm = R"rawliteral(
+<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configurar ESP32</title></head><body style="font-family: Arial; padding: 20px;">
+<h2>Configuração da Placa</h2>
+<form action="/salvar" method="POST">
+  <b>Nome da Rede WiFi:</b><br><input type="text" name="ssid" required><br><br>
+  <b>Senha do WiFi:</b><br><input type="password" name="senha"><br><br>
+  <b>IP do Servidor Python (ex: 192.168.1.15):</b><br><input type="text" name="ip" required><br><br>
+  <b>Porta (ex: 8765):</b><br><input type="text" name="porta" value="8765" required><br><br>
+  <b>ID desta Placa:</b><br><input type="text" name="espid" required><br><br>
+  <b>Brilho do LED (0-255):</b><br><input type="number" name="brilho" value="15" min="0" max="255" required><br><br>
+  <input type="submit" value="Salvar e Reiniciar" style="padding: 10px; background: #28a745; color: white; border: none; border-radius: 5px;">
+</form></body></html>
+)rawliteral";
 
-volatile bool newMsgReceived = false;
-struct_message incomingMsg;
-
-struct SlaveNode {
-    int id;
-    String mac;
-};
-std::vector<SlaveNode> slavesList;
-
-// Variáveis Channel Hunter
-int currentSlaveChannel = 1;
-unsigned long lastScanTime = 0;
-bool channelLocked = false;
-bool shouldSaveChannel = false;
-
-// ======================= LED RGB =======================
-void setLedColor(uint8_t r, uint8_t g, uint8_t b) {
-    pixels.setPixelColor(0, pixels.Color(r, g, b));
-    pixels.show();
+// ======================= HELPERS =======================
+void setNeoPixel(uint8_t r, uint8_t g, uint8_t b) {
+  pixels.setPixelColor(0, pixels.Color(r, g, b));
+  pixels.show();
 }
 
-void blinkLed(uint8_t r, uint8_t g, uint8_t b, int times, int speed) {
-    for(int i=0; i<times; i++) {
-        setLedColor(r, g, b); delay(speed);
-        setLedColor(0, 0, 0); delay(speed);
-    }
+void blinkNeoPixel(uint8_t r, uint8_t g, uint8_t b, int interval) {
+  static unsigned long previousMillis = 0;
+  static bool ledState = false;
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+    ledState = !ledState;
+    if (ledState) setNeoPixel(r, g, b);
+    else setNeoPixel(0, 0, 0);
+  }
 }
 
-// ======================= AUXILIARES =======================
-uint16_t hexTo565(String hex) {
-    if (hex.startsWith("#")) hex.remove(0, 1);
-    long number = strtol(hex.c_str(), NULL, 16);
-    int r = number >> 16; int g = number >> 8 & 0xFF; int b = number & 0xFF;
-    return dma_display->color565(r, g, b);
+uint16_t hexToRGB565(String hexColor) {
+  if (hexColor.startsWith("#")) hexColor.remove(0, 1);
+  long number = strtol(hexColor.c_str(), NULL, 16);
+  return dma_display ? dma_display->color565((number >> 16) & 0xFF, (number >> 8) & 0xFF, number & 0xFF) : 0xFFFF;
 }
 
-void stringToMac(String macStr, uint8_t *macAddr) {
-    unsigned int mac[6];
-    if (sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x", &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
-        for (int i = 0; i < 6; i++) macAddr[i] = (uint8_t)mac[i];
-    }
-}
-
-void addPeer(String macStr) {
-    uint8_t peerAddr[6];
-    stringToMac(macStr, peerAddr);
-    if (esp_now_is_peer_exist(peerAddr)) return;
-    esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, peerAddr, 6);
-    peerInfo.channel = 0; 
-    peerInfo.encrypt = false;
-    esp_now_add_peer(&peerInfo);
-}
-
-void removePeer(String macStr) {
-    uint8_t peerAddr[6];
-    stringToMac(macStr, peerAddr);
-    esp_now_del_peer(peerAddr);
-}
-
-// ======================= JSON =======================
-void saveSlaves() {
-    JsonDocument doc;
-    JsonArray array = doc.to<JsonArray>();
-    for (const auto &slave : slavesList) {
-        JsonObject obj = array.add<JsonObject>();
-        obj["id"] = slave.id;
-        obj["mac"] = slave.mac;
-    }
-    File file = LittleFS.open("/slaves.json", "w");
-    if (file) { serializeJson(doc, file); file.close(); }
-}
-
-void loadSlaves() {
-    slavesList.clear();
-    if (!LittleFS.exists("/slaves.json")) {
-        File f = LittleFS.open("/slaves.json", "w"); if (f) { f.print("[]"); f.close(); } return;
-    }
-    File file = LittleFS.open("/slaves.json", "r");
-    if (!file) return;
-
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, file);
-    file.close();
-
-    if (!error) {
-        JsonArray array = doc.as<JsonArray>();
-        for (JsonObject obj : array) {
-            SlaveNode node = {obj["id"], obj["mac"].as<String>()};
-            slavesList.push_back(node);
-            if (currentRole == "master") addPeer(node.mac);
-        }
-    } else {
-        File f = LittleFS.open("/slaves.json", "w"); if (f) { f.print("[]"); f.close(); }
-    }
-}
-
-// ======================= CALLBACKS =======================
-void OnDataRecv(const uint8_t *mac, const uint8_t *inData, int len) {
-    if (len != sizeof(struct_message)) return;
-    memcpy(&incomingMsg, inData, sizeof(incomingMsg));
-    newMsgReceived = true; 
-    
-    // Se recebeu msg, o canal está certo. Trava e pede pra salvar.
-    if (!channelLocked && currentRole != "master") {
-        channelLocked = true; 
-        shouldSaveChannel = true; 
-    }
-}
-
-void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {}
-
-// ======================= DISPLAY SETUP =======================
+// ======================= DISPLAY =======================
 void setupDisplay() {
-    HUB75_I2S_CFG::i2s_pins _pins = {R1_PIN, G1_PIN, B1_PIN, R2_PIN, G2_PIN, B2_PIN, A_PIN, B_PIN, C_PIN, D_PIN, E_PIN, LAT_PIN, OE_PIN, CLK_PIN};
-    HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN, _pins);
-    mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_10M;
-    mxconfig.driver = HUB75_I2S_CFG::FM6124;
-    mxconfig.clkphase = false;
+  HUB75_I2S_CFG::i2s_pins _pins = {R1_PIN, G1_PIN, B1_PIN, R2_PIN, G2_PIN, B2_PIN, A_PIN, B_PIN, C_PIN, D_PIN, E_PIN, LAT_PIN, OE_PIN, CLK_PIN};
+  HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN, _pins);
+  mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_10M;
+  mxconfig.driver = HUB75_I2S_CFG::FM6124;
+  mxconfig.clkphase = false;
 
-    dma_display = new MatrixPanel_I2S_DMA(mxconfig);
-    dma_display->begin();
-    dma_display->setBrightness8(50);
-    dma_display->clearScreen();
+  dma_display = new MatrixPanel_I2S_DMA(mxconfig);
+  dma_display->begin();
+  dma_display->setTextWrap(true);
+  
+  // LÊ O BRILHO DA MEMÓRIA ANTES DE INICIAR (Default: 15)
+  preferences.begin("config", true);
+  int brilho_salvo = preferences.getInt("brilho", 15);
+  preferences.end();
+  
+  dma_display->setBrightness8(brilho_salvo);
+  dma_display->clearScreen();
 }
 
-// ======================= WEB SERVER =======================
-void setupWebServer() {
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        if (!isConfigured || forceConfigMode) request->send(LittleFS, "/config.html", "text/html");
-        else {
-            if(currentRole == "master") request->send(LittleFS, "/master.html", "text/html");
-            else request->send(200, "text/plain", "Modo Slave Ativo.");
-        } 
-    });
+void printDisplay(String message, int textSize, uint16_t color) {
+  dma_display->fillScreen(0);
+  int cursor_x = 0;
+  int cursor_y = 0;
+  int char_width = 5 * textSize;
+  int char_height = 8 * textSize;
 
-    server.on("/save_config", HTTP_POST, [](AsyncWebServerRequest *request) {
-        String role = request->arg("role");
-        prefs.begin("config", false);
-        prefs.putString("role", role);
-        if (role == "master") {
-            prefs.putString("ssid", request->arg("ssid"));
-            prefs.putString("pass", request->arg("pass"));
-        } else {
-            prefs.remove("slave_ch");
-        }
-        prefs.putBool("configured", true);
-        prefs.end();
-        request->send(200, "text/plain", "Salvo! Reiniciando...");
-        delay(1000); ESP.restart(); 
-    });
-
-    if (currentRole == "master" && !forceConfigMode) {
-        server.on("/api/slaves", HTTP_GET, [](AsyncWebServerRequest *request){
-             if(LittleFS.exists("/slaves.json")) request->send(LittleFS, "/slaves.json", "application/json");
-             else request->send(200, "application/json", "[]");
-        });
-
-        server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
-            if(request->url() == "/api/add_slave" && request->method() == HTTP_POST) {
-                JsonDocument doc; deserializeJson(doc, data);
-                int id = doc["id"]; String mac = doc["mac"];
-                bool exists = false;
-                for(auto &s : slavesList) if(s.id == id) { s.mac = mac; exists = true; break; }
-                if(!exists) slavesList.push_back({id, mac});
-                saveSlaves(); addPeer(mac);
-                request->send(200, "application/json", "{\"status\":\"ok\"}");
-            }
-            if(request->url() == "/api/remove_slave" && request->method() == HTTP_POST) {
-                JsonDocument doc; deserializeJson(doc, data);
-                int id = doc["id"];
-                for (auto it = slavesList.begin(); it != slavesList.end(); ) {
-                  if (it->id == id) { removePeer(it->mac); it = slavesList.erase(it); } else { ++it; }
-                }
-                saveSlaves();
-                request->send(200, "application/json", "{\"status\":\"removed\"}");
-            }
-            if(request->url() == "/api/send" && request->method() == HTTP_POST) {
-                JsonDocument doc; deserializeJson(doc, (const char*)data);
-                JsonArray arr = doc.as<JsonArray>();
-                for (JsonObject cmd : arr) {
-                    int targetId = cmd["id"];
-                    struct_message msg;
-                    msg.id = targetId;
-                    strncpy(msg.text, cmd["text"].as<const char*>(), 63);
-                    msg.x = cmd["x"]; msg.y = cmd["y"]; msg.size = cmd["size"];
-                    msg.color = hexTo565(cmd["color"].as<String>());
-                    msg.clear = true; 
-                    
-                    if (targetId == 0) {
-                        dma_display->clearScreen();
-                        dma_display->setTextSize(msg.size);
-                        dma_display->setCursor(msg.x, msg.y);
-                        dma_display->setTextColor(msg.color);
-                        dma_display->print(msg.text);
-                    } else {
-                        for(auto &s : slavesList) {
-                            if(s.id == targetId) {
-                                uint8_t dest[6]; stringToMac(s.mac, dest);
-                                esp_now_send(dest, (uint8_t *) &msg, sizeof(msg));
-                                break; 
-                            }
-                        }
-                    }
-                    delay(30);
-                }
-                request->send(200, "application/json", "{\"status\":\"sent\"}");
-            }
-        });
+  for (int i = 0; i < message.length(); i++) {
+    char c = message[i];
+    if (c == '\n') {
+      cursor_x = 0;
+      cursor_y += char_height; 
+    } else {
+      dma_display->drawChar(cursor_x, cursor_y, c, color, 0, textSize);
+      cursor_x += char_width;
     }
-    server.begin();
+  }
 }
 
-// ======================= SETUP =======================
-void setup() {
-    Serial.begin(115200);
+void printDisplayLinhas(JsonArray linhas, int textSize) {
+  dma_display->fillScreen(0);
+  int cursor_y = 0;
+  int char_width = 5 * textSize;
+  int char_height = 8 * textSize;
+
+  for (JsonObject linha : linhas) {
+    String texto = linha["texto"] | "";
+    String corHex = linha["cor"] | "#FFFFFF";
+    uint16_t corConvertida = hexToRGB565(corHex);
+
+    int cursor_x = 0;
+    for (int i = 0; i < texto.length(); i++) {
+      char c = texto[i];
+      dma_display->drawChar(cursor_x, cursor_y, c, corConvertida, 0, textSize);
+      cursor_x += char_width;
+    }
+    cursor_y += char_height; 
+  }
+}
+
+// ======================= LÓGICA DO BOTÃO =======================
+void checarBotao() {
+  bool taApertado = (digitalRead(SETUP_BTN_PIN) == LOW);
+
+  if (taApertado && !btnIsPressed) {
+    btnIsPressed = true;
+    btnPressStart = millis();
+    btnHandled = false;
+    if (!resetPromptActive) {
+      dma_display->clearScreen();
+      dma_display->fillRect(31, 15, 2, 2, dma_display->color565(255, 255, 255));
+    }
+  } 
+  else if (!taApertado && btnIsPressed) {
+    btnIsPressed = false;
+    if (!btnHandled) {
+      if (resetPromptActive) {
+        resetPromptActive = false;
+        dma_display->clearScreen();
+      } else {
+        dma_display->clearScreen();
+      }
+    }
+  }
+
+  if (taApertado && btnIsPressed) {
+    unsigned long tempoSegurado = millis() - btnPressStart;
+    if (!resetPromptActive && tempoSegurado >= 5000 && !btnHandled) {
+      resetPromptActive = true;
+      btnHandled = true; 
+      printDisplay("RESET?\nS: Segure\nN: Clique", 1, dma_display->color565(255, 0, 0));
+    }
+    else if (resetPromptActive && tempoSegurado >= 2000 && !btnHandled) {
+      btnHandled = true;
+      printDisplay("Limpando...", 1, dma_display->color565(255, 0, 0));
+      preferences.begin("config", false);
+      preferences.clear();
+      preferences.end();
+      delay(1500);
+      ESP.restart(); 
+    }
+  }
+}
+
+// ======================= WEBSOCKET HANDLER =======================
+static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data) {
+  esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
+  switch (event_id) {
+  case WEBSOCKET_EVENT_CONNECTED:
+    ws_is_connected = true;
+    esp_websocket_client_send_text(ws_client, esp_id.c_str(), esp_id.length(), portMAX_DELAY);
+    break;
     
-    pixels.begin();
-    pixels.setBrightness(50);
-    pinMode(SETUP_BTN_PIN, INPUT_PULLUP);
+  case WEBSOCKET_EVENT_DATA:
+    if (data->op_code == 1) {
+      resetPromptActive = false; 
+      msgRedTimer = millis(); 
+      String payload = "";
+      for (int i = 0; i < data->data_len; i++) payload += (char)data->data_ptr[i];
 
-    // Botão pressionado no boot = MODO CONFIGURAÇÃO
-    if (digitalRead(SETUP_BTN_PIN) == LOW) {
-        forceConfigMode = true;
-        setLedColor(255, 200, 0); // Amarelo
-    }
-
-    if (!LittleFS.begin(true)) Serial.println("FS Error");
-    setupDisplay();
-
-    prefs.begin("config", false);
-    isConfigured = prefs.getBool("configured", false);
-    currentRole = prefs.getString("role", "slave");
-    String ssid = prefs.getString("ssid", "");
-    String pass = prefs.getString("pass", "");
-    int savedCh = prefs.getInt("slave_ch", 0);
-    prefs.end();
-
-    if (!isConfigured || forceConfigMode) {
-        // --- MODO CONFIGURAÇÃO (Mensagens Originais) ---
-        WiFi.mode(WIFI_AP);
-        WiFi.softAP("LED_CONFIG", "12345678"); // Mantido seu SSID original
-        MDNS.begin("esp32"); MDNS.addService("http", "tcp", 80);
+      JsonDocument doc;
+      if (!deserializeJson(doc, payload)) {
         
-        dma_display->setCursor(0, 0); dma_display->print("CFG: LED_CONFIG");
-        dma_display->setCursor(0, 10); dma_display->print("IP: 192.168.4.1");
-        
-        setupWebServer();
-    } 
-    else {
-        if (currentRole == "master") {
-            // >>> MASTER (Mensagens Originais + LED Verde/Azul) <<<
-            blinkLed(0, 255, 0, 3, 200); // Verde 3x
-            
-            WiFi.mode(WIFI_AP_STA);
-            WiFi.begin(ssid.c_str(), pass.c_str());
-            
-            // --- SUA ANIMAÇÃO "CONECTANDO..." RESTAURADA ---
-            dma_display->setCursor(0, 0);
-            while (WiFi.status() != WL_CONNECTED) {
-                // Pisca LED Azul enquanto tenta conectar
-                setLedColor(0, 0, 255);
-                dma_display->setCursor(0,0); dma_display->print("Conectando."); delay(500); setLedColor(0,0,0);
-                dma_display->setCursor(0,0); dma_display->print("Conectando.."); delay(500);
-                dma_display->setCursor(0,0); dma_display->print("Conectando..."); delay(500);
-                dma_display->setCursor(0,0); dma_display->clearScreen(); delay(500);
+        // NOVO: CHECA SE É COMANDO DE CONFIGURAÇÃO VIA PYTHON
+        if (doc.containsKey("comando") && doc["comando"] == "config") {
+            if (doc.containsKey("brilho")) {
+                int novo_brilho = doc["brilho"].as<int>();
+                
+                // Salva na memória
+                preferences.begin("config", false);
+                preferences.putInt("brilho", novo_brilho);
+                preferences.end();
+                
+                // Aplica imediatamente no painel!
+                if (dma_display) {
+                    dma_display->setBrightness8(novo_brilho);
+                }
             }
-            // ------------------------------------------------
-
-            setLedColor(0, 0, 255); // Azul Fixo = Conectado
-
-            dma_display->fillScreen(0);
-            // --- SUAS MENSAGENS DE MASTER CONECTADO ---
-            dma_display->setCursor(0, 0);
-            dma_display->print("REDE: " + ssid);
-            
-            // Fix do mDNS
-            MDNS.end(); 
-            if (MDNS.begin("esp32")) MDNS.addService("http", "tcp", 80);
-            
-            dma_display->setCursor(0, 10);
-            dma_display->print("IP: " + WiFi.localIP().toString());
-            dma_display->setCursor(0, 20);
-            dma_display->print("END: esp32.local");
-            
-            if (esp_now_init() != ESP_OK) Serial.println("ESP-NOW Error");
-            esp_now_register_send_cb(OnDataSent);
-            loadSlaves();
         } 
+        // SE NÃO FOR CONFIGURAÇÃO, EXIBE O TEXTO NORMALMENTE
         else {
-            // >>> SLAVE (Mensagens Originais + LED Roxo) <<<
-            blinkLed(128, 0, 128, 5, 200); // Roxo 5x
-            setLedColor(0, 0, 0);
-            
-            WiFi.mode(WIFI_STA); 
-            
-            if (savedCh > 0) {
-                esp_wifi_set_promiscuous(true);
-                esp_wifi_set_channel(savedCh, WIFI_SECOND_CHAN_NONE);
-                esp_wifi_set_promiscuous(false);
-                channelLocked = true;
-                currentSlaveChannel = savedCh;
-            } else {
-                channelLocked = false;
-            }
-            
-            WiFi.disconnect();
-            
-            dma_display->fillScreen(0);
-            // --- SUAS MENSAGENS DE SLAVE ---
-            dma_display->setCursor(0, 0); dma_display->print("SLAVE ID?");
-            dma_display->setCursor(0, 10); dma_display->print(WiFi.macAddress());
-            
-            if (esp_now_init() != ESP_OK) Serial.println("ESP-NOW Error");
-            esp_now_register_recv_cb(OnDataRecv);
+            int tamanho = doc["tamanho"] | 1;
+            JsonArray linhas = doc["linhas"];
+            printDisplayLinhas(linhas, tamanho);
         }
-        setupWebServer();
+      }
     }
+    else if (data->op_code == 2) {
+      resetPromptActive = false;
+      if (data->payload_offset == 0) {
+        if (img_buffer != nullptr) { free(img_buffer); img_buffer = nullptr; }
+        img_buffer = (uint8_t*) malloc(data->payload_len);
+        img_buffer_idx = 0;
+      }
+
+      if (img_buffer != nullptr) {
+        memcpy(img_buffer + data->payload_offset, data->data_ptr, data->data_len);
+        img_buffer_idx += data->data_len;
+
+        if (img_buffer_idx == data->payload_len) {
+          msgRedTimer = millis();
+          if (data->payload_len > 3 && img_buffer[0] == 'I') {
+            uint8_t w = img_buffer[1];
+            uint8_t h = img_buffer[2];
+            int idx = 3;
+            for (int y = 0; y < h; y++) {
+              for (int x = 0; x < w; x++) {
+                if (idx + 2 < data->payload_len) {
+                  uint8_t r = img_buffer[idx++];
+                  uint8_t g = img_buffer[idx++];
+                  uint8_t b = img_buffer[idx++];
+                  dma_display->drawPixel(x, y, dma_display->color565(r, g, b));
+                }
+              }
+            }
+          }
+          free(img_buffer);
+          img_buffer = nullptr;
+        }
+      }
+    }
+    break;
+    
+  case WEBSOCKET_EVENT_DISCONNECTED:
+    ws_is_connected = false;
+    if (img_buffer != nullptr) { free(img_buffer); img_buffer = nullptr; }
+    break;
+  }
 }
 
-// ======================= LOOP =======================
-unsigned long lastLedBlink = 0;
-bool ledState = false;
+void setup() {
+  delay(1000);
+  Serial.begin(115200);
+
+  pinMode(SETUP_BTN_PIN, INPUT_PULLUP);
+
+  pixels.begin();
+  pixels.setBrightness(40);
+  setNeoPixel(0, 0, 0);
+
+  setupDisplay();
+
+  preferences.begin("config", false);
+  rede_ssid = preferences.getString("ssid", "");
+  rede_senha = preferences.getString("senha", "");
+  ws_ip = preferences.getString("ip", "");
+  ws_porta = preferences.getString("porta", "");
+  esp_id = preferences.getString("espid", "");
+  
+  numeroAleatorio = preferences.getString("rand", "");
+  if (numeroAleatorio == "") {
+    numeroAleatorio = String(random(1000, 9999));
+    preferences.putString("rand", numeroAleatorio);
+  }
+  preferences.end();
+
+  if (rede_ssid == "" || ws_ip == "") {
+    String nomeAP = "esp-settings-" + numeroAleatorio;
+    WiFi.softAP(nomeAP.c_str());
+    if (MDNS.begin(("esp32" + numeroAleatorio).c_str())) {}
+
+    // >>> NOVO: Exibe o endereço de configuração no painel de LED <<<
+    String msg_setup = " SETUP AP\n\n esp32" + numeroAleatorio + "\n .local";
+    printDisplay(msg_setup, 1, dma_display->color565(0, 255, 255)); 
+
+    server.on("/", []() { server.send(200, "text/html", htmlForm); });
+    server.on("/salvar", HTTP_POST, []() {
+      preferences.begin("config", false);
+      preferences.putString("ssid", server.arg("ssid"));
+      preferences.putString("senha", server.arg("senha"));
+      preferences.putString("ip", server.arg("ip"));
+      preferences.putString("porta", server.arg("porta"));
+      preferences.putString("espid", server.arg("espid"));
+      preferences.putInt("brilho", server.arg("brilho").toInt());
+      preferences.end();
+      server.send(200, "text/html", "<h2>Configuracoes salvas! Reiniciando...</h2>");
+      delay(1500);
+      ESP.restart(); 
+    });
+    server.begin();
+  } else {
+    configurado = true;
+    
+    String msg_id = "PLACA ID:\n  " + esp_id;
+    printDisplay(msg_id, 1, dma_display->color565(0, 255, 255)); 
+    
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(rede_ssid.c_str(), rede_senha.c_str());
+
+    while (WiFi.status() != WL_CONNECTED) {
+      blinkNeoPixel(0, 0, 255, 255); 
+      delay(300);
+    }
+
+    String uri = "ws://" + ws_ip + ":" + ws_porta;
+    esp_websocket_client_config_t websocket_cfg = {};
+    websocket_cfg.uri = uri.c_str();
+    websocket_cfg.buffer_size = 16384;
+
+    ws_client = esp_websocket_client_init(&websocket_cfg);
+    esp_websocket_register_events(ws_client, WEBSOCKET_EVENT_ANY, websocket_event_handler, (void *)ws_client);
+    esp_websocket_client_start(ws_client);
+  }
+}
 
 void loop() {
-    unsigned long now = millis();
+  checarBotao();
 
-    // 1. MANTER mDNS ATIVO (Fix para o problema de perder conexão)
-    if (!forceConfigMode && currentRole == "master") {
-        // MDNS.update(); // Descomente se sua versão da lib pedir
-    }
-
-    // 2. PISCA LED AMARELO (Modo Config)
-    if (forceConfigMode || (!isConfigured)) {
-        if (now - lastLedBlink > 500) {
-            lastLedBlink = now;
-            ledState = !ledState;
-            if(ledState) setLedColor(255, 200, 0); else setLedColor(0,0,0);
-        }
-    }
-
-    // 3. BOTÃO FÍSICO (Quadrado de Teste & Factory Reset)
-    if (digitalRead(SETUP_BTN_PIN) == LOW) {
-        if (!btnIsPressed) {
-            btnIsPressed = true;
-            btnPressStartTime = now;
-            // Quadrado 2x2 no canto (Feedback Visual)
-            dma_display->drawRect(60, 28, 4, 4, dma_display->color565(255, 255, 255));
-            dma_display->fillRect(60, 28, 4, 4, dma_display->color565(255, 255, 255));
-        }
-        
-        // Segurou por 5s? RESET!
-        if (now - btnPressStartTime > 5000) {
-            dma_display->fillScreen(dma_display->color565(255, 0, 0)); 
-            dma_display->setCursor(0, 0); dma_display->print("FACTORY");
-            dma_display->setCursor(0, 10); dma_display->print("RESET...");
-            delay(1000);
-            
-            prefs.begin("config", false); prefs.clear(); prefs.end();
-            LittleFS.remove("/slaves.json"); // Opcional: apagar lista de slaves
-            
-            ESP.restart();
-        }
+  if (!configurado) {
+    server.handleClient();
+    blinkNeoPixel(255, 255, 0, 255); 
+  } else {
+    if (WiFi.status() != WL_CONNECTED) {
+      blinkNeoPixel(255, 0, 0, 255);
+    } else if (ws_is_connected) {
+      if (millis() - msgRedTimer < 800) blinkNeoPixel(255, 255, 0, 400); 
+      else blinkNeoPixel(0, 255, 0, 800); 
     } else {
-        if (btnIsPressed) {
-            btnIsPressed = false;
-            dma_display->fillRect(60, 28, 4, 4, 0); // Apaga quadrado
-        }
+      blinkNeoPixel(128, 0, 128, 200); 
     }
-
-    // 4. DESENHA MENSAGEM
-    if (newMsgReceived) {
-        newMsgReceived = false; 
-        if (incomingMsg.clear) dma_display->clearScreen();
-        dma_display->setTextSize(incomingMsg.size);
-        dma_display->setTextWrap(false);
-        dma_display->setCursor(incomingMsg.x, incomingMsg.y);
-        dma_display->setTextColor(incomingMsg.color);
-        dma_display->print(incomingMsg.text);
-    }
-
-    // 5. SALVA CANAL (Slave)
-    if (shouldSaveChannel) {
-        shouldSaveChannel = false;
-        prefs.begin("config", false);
-        prefs.putInt("slave_ch", currentSlaveChannel);
-        prefs.end();
-        blinkLed(0, 255, 0, 2, 100); 
-    }
-
-    // 6. CHANNEL HUNTER (Slave)
-    if (currentRole != "master" && !channelLocked) {
-        if (now - lastScanTime > 150) {
-            lastScanTime = now;
-            currentSlaveChannel++;
-            if (currentSlaveChannel > 13) currentSlaveChannel = 1;
-            
-            esp_wifi_set_promiscuous(true);
-            esp_wifi_set_channel(currentSlaveChannel, WIFI_SECOND_CHAN_NONE);
-            esp_wifi_set_promiscuous(false);
-            
-            // Pixel indicador discreto (Última linha)
-            dma_display->drawPixel(currentSlaveChannel, 31, dma_display->color565(50, 50, 50));
-            dma_display->drawPixel(currentSlaveChannel-1, 31, 0);
-        }
-    }
-
-    delay(5);
+  }
+  delay(1); 
 }

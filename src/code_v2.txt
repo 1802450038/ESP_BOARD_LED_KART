@@ -1,0 +1,407 @@
+// #include <WiFi.h>
+// #include <WebServer.h>
+// #include <ESPmDNS.h>
+// #include <Preferences.h>
+// #include "esp_websocket_client.h" // Native ESP-IDF WebSocket Client
+// #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
+// #include <Adafruit_NeoPixel.h>
+// #include <ArduinoJson.h>
+
+// // ======================= PINOS DE HARDWARE =======================
+// #define SETUP_BTN_PIN 17 // Botão para Setup/Reset
+// #define RGB_LED_PIN 48   // LED RGB nativo
+// #define NUM_LEDS 1
+
+// // SEUS PINOS DE DISPLAY ORIGINAIS
+// #define GND_1 -1
+// #define OE_PIN 13
+// #define LAT_PIN 12
+// #define CLK_PIN 11
+// #define D_PIN 10
+// #define C_PIN 9
+// #define B_PIN 8
+// #define A_PIN 7
+
+// #define GND_2 -1
+// #define B2_PIN 6
+// #define G2_PIN 5
+// #define R2_PIN 4
+// #define GND_3 -1
+// #define B1_PIN 3
+// #define G1_PIN 2
+// #define R1_PIN 1
+
+// #define E_PIN -1
+
+// #define PANEL_RES_X 64
+// #define PANEL_RES_Y 32
+// #define PANEL_CHAIN 2
+
+// MatrixPanel_I2S_DMA *dma_display = nullptr;
+// Adafruit_NeoPixel pixels(NUM_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
+// WebServer server(80);
+// Preferences preferences;
+// esp_websocket_client_handle_t ws_client = NULL;
+
+// String rede_ssid, rede_senha, ws_ip, ws_porta, esp_id;
+// String numeroAleatorio;
+// bool configurado = false;
+
+// // Controle de Estado (WebSocket e NeoPixel)
+// bool ws_is_connected = false;
+// unsigned long msgRedTimer = 0;
+
+// // HTML Configuration Page
+// const char *htmlForm = R"rawliteral(
+// <!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+// <title>Configurar ESP32</title></head><body style="font-family: Arial; padding: 20px;">
+// <h2>Configuração da Placa</h2>
+// <form action="/salvar" method="POST">
+//   <b>Nome da Rede WiFi:</b><br><input type="text" name="ssid" required><br><br>
+//   <b>Senha do WiFi:</b><br><input type="password" name="senha"><br><br>
+//   <b>IP do Servidor Python (ex: 192.168.1.15):</b><br><input type="text" name="ip" required><br><br>
+//   <b>Porta (ex: 8765):</b><br><input type="text" name="porta" value="8765" required><br><br>
+//   <b>ID desta Placa:</b><br><input type="text" name="espid" required><br><br>
+//   <input type="submit" value="Salvar e Reiniciar" style="padding: 10px; background: #28a745; color: white; border: none; border-radius: 5px;">
+// </form></body></html>
+// )rawliteral";
+
+// // ======================= HELPERS DE LED =======================
+// void setNeoPixel(uint8_t r, uint8_t g, uint8_t b)
+// {
+//   pixels.setPixelColor(0, pixels.Color(r, g, b));
+//   pixels.show();
+// }
+
+// void blinkNeoPixel(uint8_t r, uint8_t g, uint8_t b, int interval)
+// {
+//   static unsigned long previousMillis = 0;
+//   static bool ledState = false;
+//   unsigned long currentMillis = millis();
+
+//   if (currentMillis - previousMillis >= interval)
+//   {
+//     previousMillis = currentMillis;
+//     ledState = !ledState;
+//     if (ledState)
+//     {
+//       setNeoPixel(r, g, b);
+//     }
+//     else
+//     {
+//       setNeoPixel(0, 0, 0);
+//     }
+//   }
+// }
+
+// // ======================= HELPERS DE COR =======================
+// uint16_t hexToRGB565(String hexColor)
+// {
+//   if (hexColor.startsWith("#"))
+//   {
+//     hexColor.remove(0, 1);
+//   }
+//   long number = strtol(hexColor.c_str(), NULL, 16);
+//   uint8_t r = (number >> 16) & 0xFF;
+//   uint8_t g = (number >> 8) & 0xFF;
+//   uint8_t b = number & 0xFF;
+
+//   if (dma_display != nullptr)
+//   {
+//     return dma_display->color565(r, g, b);
+//   }
+//   return 0xFFFF;
+// }
+
+// // ======================= DISPLAY SETUP =======================
+// void setupDisplay()
+// {
+//   HUB75_I2S_CFG::i2s_pins _pins = {R1_PIN, G1_PIN, B1_PIN, R2_PIN, G2_PIN, B2_PIN, A_PIN, B_PIN, C_PIN, D_PIN, E_PIN, LAT_PIN, OE_PIN, CLK_PIN};
+//   HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN, _pins);
+//   mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_10M;
+//   mxconfig.driver = HUB75_I2S_CFG::FM6124;
+//   mxconfig.clkphase = false;
+
+//   dma_display = new MatrixPanel_I2S_DMA(mxconfig);
+//   dma_display->begin();
+//   dma_display->setTextWrap(true);
+//   dma_display->setBrightness8(15);
+//   dma_display->clearScreen();
+// }
+// /*
+// Deprecated: Esta função foi substituída por 'printDisplay' que agora suporta múltiplas linhas e controle de espaçamento entre caracteres. A nova função é mais flexível e adequada para exibir mensagens formatadas no painel, enquanto esta versão antiga era limitada a uma única linha e não permitia controle de espaçamento, o que podia resultar em texto difícil de ler dependendo do tamanho da fonte.
+// */
+// // void printDisplay(String message, int textSize, uint16_t color)
+// // {
+// //   dma_display->fillScreen(0);
+// //   dma_display->setCursor(0, 0);
+// //   dma_display->setTextSize(textSize);
+// //   dma_display->setTextColor(color);
+// //   dma_display->print(message);
+// // }
+
+// void printDisplay(String message, int textSize, uint16_t color)
+// {
+//   dma_display->fillScreen(0);
+
+//   int cursor_x = 0;
+//   int cursor_y = 0;
+
+//   // A MÁGICA ACONTECE AQUI:
+//   // O padrão da biblioteca é 1.
+//   // Coloque 0 para as letras ficarem coladas lado a lado.
+//   // Coloque -1 se quiser que elas se sobreponham um pouco (bom para fontes grandes).
+//   int espacamento_horizontal = 0;
+
+//   // A fonte padrão do Adafruit_GFX tem 5 pixels de largura por 8 de altura
+//   int char_width = 5 * textSize;
+//   int char_height = 8 * textSize;
+
+//   for (int i = 0; i < message.length(); i++)
+//   {
+//     char c = message[i];
+
+//     // O Python manda um \n para quebrar a linha, precisamos tratar isso manualmente agora
+//     if (c == '\n')
+//     {
+//       cursor_x = 0;
+//       cursor_y += char_height; // Pula para a linha de baixo
+//     }
+//     else
+//     {
+//       // Desenha 1 única letra na posição exata
+//       // drawChar(X, Y, Letra, Cor_Texto, Cor_Fundo, Tamanho)
+//       dma_display->drawChar(cursor_x, cursor_y, c, color, 0, textSize);
+
+//       // Avança o cursor no eixo X para a próxima letra usando nosso espaçamento customizado
+//       cursor_x += char_width + espacamento_horizontal;
+//     }
+//   }
+// }
+
+// // Nova função que desenha linha por linha com cores independentes
+// void printDisplayLinhas(JsonArray linhas, int textSize)
+// {
+//   dma_display->fillScreen(0);
+
+//   int cursor_y = 0;
+//   int espacamento_horizontal = 0; // Deixe 0 para fonte normal, ou -1 para espremer
+//   int char_width = 5 * textSize;
+//   int char_height = 8 * textSize;
+
+//   for (JsonObject linha : linhas)
+//   {
+//     String texto = linha["texto"] | "";
+//     String corHex = linha["cor"] | "#FFFFFF";
+//     uint16_t corConvertida = hexToRGB565(corHex);
+
+//     int cursor_x = 0;
+//     for (int i = 0; i < texto.length(); i++)
+//     {
+//       char c = texto[i];
+//       dma_display->drawChar(cursor_x, cursor_y, c, corConvertida, 0, textSize);
+//       cursor_x += char_width + espacamento_horizontal;
+//     }
+//     cursor_y += char_height; // Pula para a próxima linha no painel
+//   }
+// }
+
+// // ======================= WEBSOCKET HANDLER =======================
+// static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+// {
+//   esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
+//   switch (event_id)
+//   {
+//   case WEBSOCKET_EVENT_CONNECTED:
+//     Serial.println("[WS] Conectado ao Servidor Python!");
+//     ws_is_connected = true;
+//     esp_websocket_client_send_text(ws_client, esp_id.c_str(), esp_id.length(), portMAX_DELAY);
+//     break;
+
+//   case WEBSOCKET_EVENT_DATA:
+//     if (data->op_code == 1) // 1 = Text frame
+//     {
+//       msgRedTimer = millis(); // Aciona o gatilho para o LED ficar vermelho
+
+//       String payload = "";
+//       for (int i = 0; i < data->data_len; i++)
+//       {
+//         payload += (char)data->data_ptr[i];
+//       }
+
+//       Serial.println("[WS] JSON Recebido: " + payload);
+
+//       JsonDocument doc;
+//       DeserializationError error = deserializeJson(doc, payload);
+
+//       // if (!error) {
+//       //   String texto = doc["texto"] | "";
+//       //   int tamanho = doc["tamanho"] | 1;
+//       //   String corHex = doc["cor"] | "#FFFFFF";
+
+//       //   uint16_t corConvertida = hexToRGB565(corHex);
+//       //   printDisplay(texto, tamanho, corConvertida);
+
+//       if (!error)
+//       {
+//         int tamanho = doc["tamanho"] | 1;
+//         JsonArray linhas = doc["linhas"];
+//         // Chama o novo motor de renderização
+//         printDisplayLinhas(linhas, tamanho);
+//       }
+//       else
+//       {
+//         Serial.print(F("Erro ao analisar JSON: "));
+//         Serial.println(error.f_str());
+//       }
+//     }
+//     break;
+
+//   case WEBSOCKET_EVENT_DISCONNECTED:
+//     Serial.println("[WS] Desconectado do Servidor.");
+//     ws_is_connected = false;
+//     break;
+//   }
+// }
+
+// void setup()
+// {
+//   delay(1000);
+//   Serial.begin(115200);
+//   delay(1000);
+
+//   // Setup do NeoPixel
+//   pixels.begin();
+//   pixels.setBrightness(40); // 40 de 255 para não cegar ninguem
+//   setNeoPixel(0, 0, 0);
+
+//   Serial.println("\nIniciando ESP32...");
+//   Serial.println("Iniciando display...");
+//   setupDisplay();
+
+//   preferences.begin("config", false);
+//   rede_ssid = preferences.getString("ssid", "");
+//   rede_senha = preferences.getString("senha", "");
+//   ws_ip = preferences.getString("ip", "");
+//   ws_porta = preferences.getString("porta", "");
+//   esp_id = preferences.getString("espid", "");
+
+//   numeroAleatorio = preferences.getString("rand", "");
+//   if (numeroAleatorio == "")
+//   {
+//     numeroAleatorio = String(random(1000, 9999));
+//     preferences.putString("rand", numeroAleatorio);
+//   }
+//   preferences.end();
+
+//   if (rede_ssid == "" || ws_ip == "")
+//   {
+//     // ---- CONFIGURATION MODE ----
+//     Serial.println("\nModo de Configuração ativado.");
+//     String nomeAP = "esp-settings-" + numeroAleatorio;
+
+//     WiFi.softAP(nomeAP.c_str());
+//     Serial.print("Ponto de Acesso criado: ");
+//     Serial.println(nomeAP);
+
+//     String mDnsName = "esp32" + numeroAleatorio;
+//     if (MDNS.begin(mDnsName.c_str()))
+//     {
+//       Serial.println("MDNS iniciado: http://" + mDnsName + ".local");
+//     }
+
+//     server.on("/", []()
+//               { server.send(200, "text/html", htmlForm); });
+
+//     server.on("/salvar", HTTP_POST, []()
+//               {
+//       preferences.begin("config", false);
+//       preferences.putString("ssid", server.arg("ssid"));
+//       preferences.putString("senha", server.arg("senha"));
+//       preferences.putString("ip", server.arg("ip"));
+//       preferences.putString("porta", server.arg("porta"));
+//       preferences.putString("espid", server.arg("espid"));
+//       preferences.end();
+      
+//       server.send(200, "text/html", "<h2>Configuracoes salvas! Reiniciando...</h2>");
+//       delay(1500);
+//       ESP.restart(); });
+
+//     server.begin();
+//     Serial.println("Servidor Web (Nativo) iniciado!");
+//   }
+//   else
+//   {
+//     // ---- WORK MODE ----
+//     configurado = true;
+//     WiFi.setAutoReconnect(true); // Garante que o WiFi tente voltar sozinho se o roteador cair
+//     Serial.println("\nConectando ao WiFi: " + rede_ssid);
+//     WiFi.begin(rede_ssid.c_str(), rede_senha.c_str());
+
+//     while (WiFi.status() != WL_CONNECTED)
+//     {
+//       blinkNeoPixel(0, 0, 255, 255); // Azul piscando rápido enquanto procura WiFi
+//       delay(300);
+//       Serial.print(".");
+//     }
+//     Serial.println("\nWiFi Conectado! IP: " + WiFi.localIP().toString());
+
+//     // Configure Native ESP-IDF WebSocket Client
+//     String uri = "ws://" + ws_ip + ":" + ws_porta;
+//     esp_websocket_client_config_t websocket_cfg = {};
+//     websocket_cfg.uri = uri.c_str();
+
+//     ws_client = esp_websocket_client_init(&websocket_cfg);
+//     esp_websocket_register_events(ws_client, WEBSOCKET_EVENT_ANY, websocket_event_handler, (void *)ws_client);
+//     esp_websocket_client_start(ws_client);
+
+//     Serial.println("Iniciando conexao WebSocket para: " + uri);
+//   }
+// }
+
+// void loop()
+// {
+//   if (!configurado)
+//   {
+//     server.handleClient();
+//     blinkNeoPixel(255, 255, 0, 255); // Amarelo Piscando: Modo de Configuração AP
+//   }
+//   else
+//   {
+//     // ---- GERENCIAMENTO DE ESTADO DO LED E CONEXÃO ----
+//     if (WiFi.status() != WL_CONNECTED)
+//     {
+//       // Se o Wi-Fi caiu completamente, pisca roxo também e aguarda o auto-reconnect do WiFi
+//       blinkNeoPixel(255, 0, 0, 255);
+//     }
+//     else if (ws_is_connected)
+//     {
+//       if (millis() - msgRedTimer < 800)
+//       {
+//         blinkNeoPixel(255, 255, 0, 400); // Amarelo sólido por 800ms ao receber mensagem
+//       }
+//       else
+//       {
+//         blinkNeoPixel(0, 255, 0, 800); // Verde Piscando: Tudo OK, Conectado
+//       }
+//     }
+//     else
+//     {
+//       blinkNeoPixel(128, 0, 128, 255); // Roxo Piscando: Sem conexão com o Python
+
+//       // Cão de Guarda (Watchdog) para forçar reconexão do WebSocket
+//       static unsigned long lastWsRetry = 0;
+//       if (millis() - lastWsRetry > 5000)
+//       {
+//         lastWsRetry = millis();
+//         if (ws_client != NULL && !esp_websocket_client_is_connected(ws_client))
+//         {
+//           Serial.println("[WATCHDOG] Forcando reinicio do socket...");
+//           esp_websocket_client_stop(ws_client);
+//           esp_websocket_client_start(ws_client);
+//         }
+//       }
+//     }
+//   }
+//   delay(10);
+// }
