@@ -17,6 +17,10 @@ dados_grid_atual = []
 cols_exibir_atual = []
 ultima_att_grid = "Aguardando..."
 
+duracao_prova = 0
+inicio_prova = 0
+em_corrida = False
+
 def obter_ip_local():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

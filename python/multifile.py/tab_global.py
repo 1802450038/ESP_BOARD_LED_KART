@@ -32,7 +32,7 @@ class TabGlobal(ttk.Frame):
         f_gl = tk.Frame(self, padx=10, pady=10); f_gl.pack(fill=tk.X)
         tk.Label(f_gl, text="Tamanho:").pack(side=tk.LEFT)
         self.var_tamanho_global = tk.StringVar(value="2")
-        ttk.Combobox(f_gl, textvariable=self.var_tamanho_global, values=["1", "2"], width=3, state="readonly").pack(side=tk.LEFT, padx=5)
+        ttk.Combobox(f_gl, textvariable=self.var_tamanho_global, values=["1", "2", "3"], width=3, state="readonly").pack(side=tk.LEFT, padx=5)
         self.btn_cor_global = tk.Button(f_gl, text="      ", bg=self.cor_atual_hex_global, command=self.selecionar_cor_global)
         self.btn_cor_global.pack(side=tk.LEFT, padx=15)
         tk.Button(f_gl, text="Disparar", bg="#28a745", fg="white", command=self.enviar_mensagem_global).pack(side=tk.RIGHT, padx=10)

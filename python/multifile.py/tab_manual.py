@@ -19,7 +19,7 @@ class TabManual(ttk.Frame):
         frame_estilo_manual.pack(fill=tk.X)
         tk.Label(frame_estilo_manual, text="Tamanho do Texto:").pack(side=tk.LEFT)
         self.var_tamanho_manual = tk.StringVar(value="2")
-        ttk.Combobox(frame_estilo_manual, textvariable=self.var_tamanho_manual, values=["1", "2"], width=3, state="readonly").pack(side=tk.LEFT, padx=5)
+        ttk.Combobox(frame_estilo_manual, textvariable=self.var_tamanho_manual, values=["1", "2","3"], width=3, state="readonly").pack(side=tk.LEFT, padx=5)
         tk.Label(frame_estilo_manual, text="Cor:").pack(side=tk.LEFT, padx=(15, 5))
         self.btn_cor_manual = tk.Button(frame_estilo_manual, text="      ", bg=self.cor_atual_hex_manual, relief=tk.RAISED, command=self.selecionar_cor_manual, cursor="hand2")
         self.btn_cor_manual.pack(side=tk.LEFT)

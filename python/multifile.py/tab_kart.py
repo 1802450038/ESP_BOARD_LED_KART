@@ -148,6 +148,13 @@ class TabKart(ttk.Frame):
             # --- PROTEÇÃO GHOST THREAD ---
             self.thread_id_kart = time.time() 
             
+            try:
+                core.duracao_prova = float(self.entry_duracao_kart.get()) * 60
+            except:
+                core.duracao_prova = 15 * 60
+            core.inicio_prova = time.time()
+            core.em_corrida = True
+            
             self.btn_iniciar_kart.config(state="disabled")
             self.btn_parar_kart.config(state="normal")
             self.btn_abrir_viewer.config(state="normal") 
@@ -161,6 +168,7 @@ class TabKart(ttk.Frame):
 
     def parar_kart(self):
         self.is_running_kart = False
+        core.em_corrida = False
         self.btn_iniciar_kart.config(state="normal")
         self.btn_parar_kart.config(state="disabled")
         self.btn_abrir_viewer.config(state="disabled") 
@@ -206,22 +214,26 @@ class TabKart(ttk.Frame):
                     
                     grid_dados.sort(key=sort_key, reverse=reverter_ordem)
                     
-                    # --- ALIMENTA O DASHBOARD VISUAL NA MEMÓRIA COM AS COLUNAS FIXAS ---
+                    # --- ALIMENTA O DASHBOARD VISUAL NA MEMÓRIA COM AS COLUNAS DINÂMICAS ---
                     dados_formatados_viewer = []
                     for p in grid_dados:
-                        row_dict = {
-                            "Posicao": p.get("Posicao", ""),
-                            "Numero": str(p.get("Numero", "")).zfill(2) if str(p.get("Numero", "")).isdigit() else p.get("Numero", ""),
-                            "Piloto": p.get("Piloto", ""),
-                            "TempoMelhorVolta": core.formatar_tempo(p.get("TempoMelhorVolta", "")) if p.get("TempoMelhorVolta") else "",
-                            "MelhorVoltanaVolta": p.get("MelhorVoltanaVolta", ""),
-                            "TempoTotal": core.formatar_tempo(p.get("TempoTotal", "")) if p.get("TempoTotal") else "",
-                            "Voltas": p.get("Voltas", ""),
-                            "VelMedia": f"{p.get('VelMedia'):.2f}" if isinstance(p.get("VelMedia"), float) else p.get("VelMedia", ""),
-                            "UltimaVolta": core.formatar_tempo(p.get("UltimaVolta", "")) if p.get("UltimaVolta") else ""
-                        }
+                        row_dict = {}
+                        for col in cols_exibir:
+                            val = p.get(col, "")
+                            if "nome" in col.lower() or "piloto" in col.lower():
+                                val = str(val).strip()
+                            elif "tempo" in col.lower() or isinstance(val, datetime):
+                                val = core.formatar_tempo(val)
+                            elif "numero" in col.lower() and str(val).isdigit():
+                                val = str(val).zfill(2)
+                            elif isinstance(val, float):
+                                val = f"{val:.2f}"
+                            else:
+                                val = str(val)
+                            row_dict[col] = val
                         dados_formatados_viewer.append(row_dict)
                     
+                    core.cols_exibir_atual = cols_exibir.copy()
                     core.dados_grid_atual = dados_formatados_viewer
                     core.ultima_att_grid = datetime.now().strftime("%H:%M:%S")
                     # -------------------------------------------------------------------
@@ -314,11 +326,13 @@ class TabKart(ttk.Frame):
         self.entry_pilotos_kart = ttk.Entry(fk_params, width=30); self.entry_pilotos_kart.insert(0, "8,9,10,11,12,13,14,15"); self.entry_pilotos_kart.grid(row=0, column=1, sticky="w", padx=5)
         ttk.Label(fk_params, text="Atualizar (Seg):").grid(row=0, column=2, sticky="e")
         self.entry_intervalo_kart = ttk.Entry(fk_params, width=6); self.entry_intervalo_kart.insert(0, "2"); self.entry_intervalo_kart.grid(row=0, column=3, sticky="w", padx=5)
+        ttk.Label(fk_params, text="Duração (min):").grid(row=0, column=4, sticky="e")
+        self.entry_duracao_kart = ttk.Entry(fk_params, width=6); self.entry_duracao_kart.insert(0, "15"); self.entry_duracao_kart.grid(row=0, column=5, sticky="w", padx=5)
 
         fe_k = ttk.Frame(fk_params); fe_k.grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 0))
         ttk.Label(fe_k, text="Tamanho Fonte:").pack(side=tk.LEFT)
         self.var_tamanho_kart = tk.StringVar(value="1")
-        ttk.Combobox(fe_k, textvariable=self.var_tamanho_kart, values=["1", "2"], width=3, state="readonly").pack(side=tk.LEFT, padx=5)
+        ttk.Combobox(fe_k, textvariable=self.var_tamanho_kart, values=["1", "2","3"], width=3, state="readonly").pack(side=tk.LEFT, padx=5)
         self.btn_cor_kart = tk.Button(fe_k, text=" Cor Padrão ", bg=self.cor_atual_hex_kart, relief=tk.RAISED, command=self.selecionar_cor_kart)
         self.btn_cor_kart.pack(side=tk.LEFT, padx=10)
         self.var_modo_colorido = tk.BooleanVar(value=True)
